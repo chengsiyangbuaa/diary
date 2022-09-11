@@ -1,0 +1,104 @@
+# 恶意代码同源判定技术研究复现工作
+乔延臣博士的论文《恶意代码同源判定技术研究》一共提出了4种方法：复用代码快速溯源方法（第三章）、恶意代码相似模块快速提取方法（第四章）、 基于调用行为的恶意代码同源判定方法（第五章）、基于调用习惯的恶意代码同源判定方法（第六章）。目前我正在对复用代码快速溯源方法（第三章）的方法进行复现。
+## 复用代码快速溯源方法
+此方法主要可以分为三部分：预处理、索引构建、函数溯源。
+### 预处理（已完成）
+此部分已经全部完成。能够做到给出一个样本，通过idapython脚本代码，获得其反汇编代码，函数块，每个函数的代码块，每个代码的simhash信息。以上信息通过json储存。
+一下内容是工作内容概要。
+预处理流程图如下：
+![](https://tallestdaisy.oss-cn-beijing.aliyuncs.com/img/20220911133605.png)
+1. 汇编代码获取
+   使用IDA Pro逆向未加壳或脱壳样本获取汇编代码
+2. 函数代码提取
+   逆向获取的汇编代码中，“proc near”标识函数的开始，而“endp”标识函数结束，依据这两个标识将汇编代码拆分为多个函数。
+3. 代码块切分
+   对内部有jnz、jmp等跳转指令的函数，依据跳转指令及跳转位置，将函数划分为多个代码块，而没有跳转指令的则将函数主体看作一个代码块。
+4. 代码标准化处理
+   对源代码的轻微改动将造成汇编代码中寄存器、立即数、内存地址的大幅变动，为了忽略这种差异对代码造成的影响，依据一些规则对汇编代码进行标准化处理。
+5. simhash值的计算
+   一个文本对象需要经过分词、哈希、加权、合并、降维等5个步骤，最终得出N个比特位的simhash值。
+   1. 分词 使用2-gram标准化的指令序列分词
+   2. 哈希 使用MD5哈希算法
+   3. 加权 
+   4. 合并 
+   5. 降维 最终得到64位的simhash，每一位都是0或1
+### 索引构建（已完成）
+此部分代码已经基本完成。能够做到通过读取上一部分的json文件，将样本的信息，通过Java JDBC存储到mysql数据库种。通过设计数据库表的关系模型，模拟出倒排索引的结构。
+由于上一部分的代码是python，这一部分的代码是java，整个流程还没能完全自动化，后续应进行改进。
+目前建立索引的样本有限，仅仅有四个APT-32样本。手中的APT-32样本有30余个，但是能够被ida识别并且反汇编的样本仅有4个。所以后续工作还要寻找更多的带标签的样本。
+#### 倒排索引结构
+这是论文中的倒排索引结构。复现工作对此结构为基础进行设计。
+![](https://tallestdaisy.oss-cn-beijing.aliyuncs.com/img/20220911133640.png)
+#### 数据库表
+##### 表设计
+1. sample表是存储样本的表
+2. functions表是存储方法的表
+3. block是存储代码块的表
+4. simhash是存储simhash值的表
+5. 由于样本和方法，方法和代码块，代码块和simhash的关系都是多对多关系，所以设计三个关联表sample_functions、functions_block、block_simhash来存储他们之间的多对多关系。
+##### 创建语句
+```SQL
+create table sample(
+	id int PRIMARY KEY auto_increment,
+	filename varchar(256)
+)
+
+create table functions(
+	id int PRIMARY KEY auto_increment,
+	function_name varchar(256),
+	ass_ins_count int,
+	block_count int,
+	sample_source int, -- 依赖于sample.id
+	CONSTRAINT functions_sample_source_fk FOREIGN KEY (sample_source) REFERENCES sample (id)
+)
+
+create table block(
+	id int PRIMARY KEY auto_increment,
+	block_name varchar(256),
+	ass_ins_count int,
+	block_group int,
+	functions_source int, -- 依赖于functions.id
+	CONSTRAINT block_functions_source_fk FOREIGN KEY (functions_source) REFERENCES functions (id)
+)
+
+create table simhash(
+	id varchar(100) PRIMARY KEY,
+	count int
+)
+
+create table sample_functions(
+	id int PRIMARY KEY auto_increment,
+	sample_id int, -- 依赖于sample.id
+	functions_id int, -- 依赖于functions.id
+	CONSTRAINT sample_functions_sample_id_fk FOREIGN KEY (sample_id) REFERENCES sample (id),
+	CONSTRAINT sample_functions_functions_id_fk FOREIGN KEY (functions_id) REFERENCES functions (id)
+)
+
+create table functions_block(
+	id int PRIMARY KEY auto_increment,
+	functions_id int, -- 依赖于functions.id
+	block_id int, -- 依赖于block.id
+	CONSTRAINT functions_block_functions_id_fk FOREIGN KEY (functions_id) REFERENCES functions (id),
+	CONSTRAINT functions_block_block_id_fk FOREIGN KEY (block_id) REFERENCES block (id)
+)
+
+create table block_simhash(
+	id int PRIMARY KEY auto_increment, 
+	block_id int, -- 依赖于block.id
+	simhash_id varchar(100), -- 依赖于simhash.id
+	CONSTRAINT block_simhash_block_id_fk FOREIGN KEY (block_id) REFERENCES block (id),
+	CONSTRAINT block_simhash_simhash_id_fk FOREIGN KEY (simhash_id) REFERENCES simhash (id)
+)
+```
+##### 关系模型
+数据库表的关系模型图如下
+![](https://tallestdaisy.oss-cn-beijing.aliyuncs.com/img/20220911133042.png)
+### 函数溯源（待完成）
+这一部分是待完成部分，目前还未开始进行。
+函数溯源部分包括两个过程：函数检索和相似判定
+#### 函数检索
+给出待溯源样本，基于上一部分建立的倒排索引，根据simhash进行检索，并且获取潜在相似函数集合
+函数检索流程图如下：
+![](https://tallestdaisy.oss-cn-beijing.aliyuncs.com/img/20220911134528.png)
+#### 相似判定
+由函数检索得出的潜在相似函数集合，并不能直接代表相似。还要进行代码块之间的跳转关系进行判断。
